@@ -385,7 +385,7 @@ class Unet(nn.Module):
         self.watermark_scale = watermark_scale
         self.blur = hf.GaussianBlur(kernel_size=kernel_size, max_sigma=max_sigma, sample_sigma=False)
 
-    def forward(self, x_in, code):
+    def forward(self, x_in, code, wm_scale=None):
 
         x = self.init_conv(x_in)
         r = x.clone()
@@ -424,7 +424,10 @@ class Unet(nn.Module):
         wm_out = torch.tanh(self.final_conv(x))
         wm_out = self.blur(wm_out)
 
-        img_out = (1 - self.watermark_scale) * x_in + self.watermark_scale * wm_out
+        if wm_scale is None:
+            wm_scale = self.watermark_scale
+
+        img_out = (1 - wm_scale) * x_in + wm_scale * wm_out
         outputs = {"image_out": img_out}
 
         return outputs

@@ -12,9 +12,8 @@ import shutil
 from tqdm import trange, tqdm
 from collections import defaultdict
 import argparse
-import numpy as np
 
-from Detector import Detector
+from Decoder import Decoder
 from Watermark_Embedder import Unet
 
 parser = argparse.ArgumentParser(description="Training Params")
@@ -32,35 +31,28 @@ parser.add_argument("--target", help="Model output target -> image/noise", type=
 parser.add_argument("--nepoch", help="Number of training epochs", type=int, default=2000)
 parser.add_argument("--batch_size", "-bs", help="Training batch size", type=int, default=64)
 parser.add_argument("--image_size", '-ims', help="Input image size", type=int, default=64)
-parser.add_argument("--diff_ch_multi", '-dw', help="Diffusion Channel width multiplier", type=int, default=64)
-parser.add_argument("--diff_block_widths", '-dbw', help="Diffusion Channel multiplier for the input of each block",
+parser.add_argument("--wm_ch_multi", '-dw', help="Diffusion Channel width multiplier", type=int, default=64)
+parser.add_argument("--wm_block_widths", '-dbw', help="Diffusion Channel multiplier for the input of each block",
                     type=int, nargs='+', default=(1, 2, 4, 8))
 
-parser.add_argument("--d_ch_multi", '-dew', help="Detector Channel width multiplier", type=int, default=64)
-parser.add_argument("--d_block_widths", '-debw', help="Detector Channel multiplier for the input of each block", type=int,
+parser.add_argument("--d_ch_multi", '-dew', help="Decoder Channel width multiplier", type=int, default=64)
+parser.add_argument("--d_block_widths", '-debw', help="Decoder Channel multiplier for the input of each block", type=int,
                     nargs='+', default=(1, 2, 4, 8))
 
 parser.add_argument("--device_index", help="GPU device index", type=int, default=0)
 parser.add_argument("--save_interval", '-si', help="Number of iteration per save", type=int, default=256)
-parser.add_argument("--accum_steps", '-as', help="Number of gradient accumulation steps", type=int, default=1)
-parser.add_argument("--uncert_multi", '-um', help="Uncertainty noise multiplier", type=int, default=1)
 
-parser.add_argument("--num_steps", '-ns', help="number of training diffusion steps", type=int, default=50)
 parser.add_argument("--embedding_size", '-es', help="Size of the embedding vector", type=int, default=32)
 parser.add_argument("--blur_size", help="Size Blur kernel", type=int, default=5)
 
 # float args
 parser.add_argument("--lr", help="Learning rate", type=float, default=1e-4)
-parser.add_argument("--noise_level", help="Lowest alpha for noise", type=float, default=0.8)
-parser.add_argument("--detect_loss_scale", "-dtl", help="Watermark Detector Loss Scale", type=float, default=0.001)
-parser.add_argument("--decode_loss_scale", "-dcl", help="Watermark Decoder Loss Scale", type=float, default=0.001)
 parser.add_argument("--sigma_size", help="Kernel sigma", type=float, default=2)
 parser.add_argument("--watermark_scale", help="How mush to scale the watermark by", type=float, default=0.05)
 
 # bool args
 parser.add_argument("--load_checkpoint", '-cp', action='store_true', help="Load from checkpoint")
 parser.add_argument("--lr_decay", '-ld', action='store_true', help="learning rate decay")
-parser.add_argument("--with_sigma", '-ws', action='store_true', help="Use VAE sigma output to condition Diffusion")
 
 args = parser.parse_args()
 
@@ -116,7 +108,7 @@ test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
 dataiter = iter(test_loader)
 test_images, _ = next(dataiter)
 
-diffusion_net = Unet(channels=test_images.shape[1],
+watermark_net = Unet(channels=test_images.shape[1],
                      img_size=args.image_size,
                      out_dim=test_images.shape[1],
                      dim=args.diff_ch_multi,
@@ -126,11 +118,11 @@ diffusion_net = Unet(channels=test_images.shape[1],
                      max_sigma=args.sigma_size,
                      watermark_scale=args.watermark_scale).to(device)
 
-detector = Detector(channels=test_images.shape[1], num_outputs=args.embedding_size,
-                    ch=args.d_ch_multi, blocks=args.d_block_widths).to(device)
+decoder = Decoder(channels=test_images.shape[1], num_outputs=args.embedding_size,
+                  ch=args.d_ch_multi, blocks=args.d_block_widths).to(device)
 
 # Setup optimizer
-params = [*diffusion_net.parameters(), *detector.parameters()]
+params = [*watermark_net.parameters(), *decoder.parameters()]
 optimizer = optim.Adam(params, lr=args.lr)
 
 # Flag to check if model has exploded
@@ -147,15 +139,15 @@ else:
 
 # Let's see how many Parameters our Model has!
 num_model_params = 0
-for param in diffusion_net.parameters():
+for param in watermark_net.parameters():
     num_model_params += param.flatten().shape[0]
-print("Diffusion Model has %d (approximately %d Million) Parameters!" % (num_model_params, num_model_params//1e6))
+print("Watermark Model has %d (approximately %d Million) Parameters!" % (num_model_params, num_model_params//1e6))
 
 # Let's see how many Parameters our Model has!
 num_model_params = 0
-for param in detector.parameters():
+for param in decoder.parameters():
     num_model_params += param.flatten().shape[0]
-print("Detector Model has %d (approximately %d Million) Parameters!" % (num_model_params, num_model_params//1e6))
+print("Decoder Model has %d (approximately %d Million) Parameters!" % (num_model_params, num_model_params//1e6))
 
 # Create the save directory if it does not exist
 if not os.path.isdir(args.save_dir + "/Models"):
@@ -171,8 +163,8 @@ if args.load_checkpoint:
     checkpoint = torch.load(args.save_dir + "/Models/" + save_file_name + ".pt",
                             map_location="cpu")
     print("Checkpoint loaded")
-    diffusion_net.load_state_dict(checkpoint['model_state_dict'])
-    detector.load_state_dict(checkpoint['detector_model_state_dict'])
+    watermark_net.load_state_dict(checkpoint['model_state_dict'])
+    decoder.load_state_dict(checkpoint['decoder_model_state_dict'])
 
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -196,8 +188,8 @@ else:
 
 # Start training loop
 for epoch in trange(start_epoch, args.nepoch, leave=False):
-    diffusion_net.train()
-    detector.train()
+    watermark_net.train()
+    decoder.train()
 
     optimizer.zero_grad()
     for i, (images, _) in enumerate(tqdm(train_loader, leave=False)):
@@ -216,49 +208,29 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
             ones_spot = torch.randint(args.embedding_size, (bs, ), device=device)
             codes = F.one_hot(ones_spot, args.embedding_size).float()
 
-            model_output = diffusion_net(images, code=codes)
+            model_output = watermark_net(images, code=codes)
 
             img_cat = torch.cat((model_output["image_out"], images), 0)
             detector_input = img_cat + 0.01 * torch.randn_like(img_cat)
 
-            pred_codes, detect = detector(detector_input)
+            decoder_output = decoder(detector_input)
 
             img_loss = F.mse_loss(model_output["image_out"], images)
-            code_loss = F.cross_entropy(pred_codes[:bs], ones_spot)
-            no_code_loss = F.cross_entropy(pred_codes[bs:], (1/args.embedding_size) * torch.ones_like(pred_codes[bs:]))
+            code_loss = F.cross_entropy(decoder_output["decoded"][:bs], ones_spot)
+            no_code_loss = F.cross_entropy(decoder_output["decoded"][bs:],
+                                           (1/args.embedding_size) * torch.ones_like(decoder_output["decoded"][bs:]))
 
             contains_watermark = torch.cat((torch.ones(bs, 1, device=device),
                                             torch.zeros(bs, 1, device=device)), 0)
 
-            wm_loss = F.binary_cross_entropy_with_logits(detect, contains_watermark)
-
-            loss = args.decode_loss_scale * (code_loss + no_code_loss) + args.detect_loss_scale * wm_loss
-            # loss = code_loss
+            loss = code_loss + no_code_loss
 
         data_logger["img_loss"].append(img_loss.item())
         data_logger["code_loss"].append(code_loss.item())
-        data_logger["wm_loss"].append(wm_loss.item())
         data_logger["no_code_loss"].append(no_code_loss.item())
 
-        pred_detect_out = pred_codes[:bs].argmax(1)
+        pred_detect_out = decoder_output["decoded"][:bs].argmax(1)
         data_logger["wm_accuracy"].append((pred_detect_out == ones_spot).float().mean().item())
-
-        detect_out = (detect > 0.5).long()
-        data_logger["detect_accuracy"].append((detect_out == contains_watermark.long()).float().mean().item())
-
-        wm_detected, wm_counts = np.unique(pred_codes[bs:].argmax(-1).detach().cpu().numpy(), return_counts=True)
-
-        counts_log = []
-        for j in range(args.embedding_size):
-            wm_count = wm_counts[wm_detected == j]
-            if len(wm_count) > 0:
-                counts_log.append(wm_count[0])
-            else:
-                counts_log.append(0)
-
-        data_logger["counts_log"] = np.array(data_logger["counts_log"]) + np.array(counts_log)
-        data_logger["wm_sm"] = F.softmax(pred_codes[:bs], -1).mean(0).detach().cpu().numpy()
-        data_logger["no_wm_sm"] = F.softmax(pred_codes[bs:], -1).mean(0).detach().cpu().numpy()
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -266,8 +238,8 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
         optimizer.zero_grad()
 
         if (current_iter + 1) % args.save_interval == 0:
-            diffusion_net.eval()
-            detector.eval()
+            watermark_net.eval()
+            decoder.eval()
 
             with torch.no_grad():
                 with torch.cuda.amp.autocast():
@@ -284,19 +256,14 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
                     contains_watermark = torch.cat((torch.ones(test_images.shape[0], 1, device=device),
                                                     torch.zeros(test_images.shape[0], 1, device=device)), 0)
 
-                    model_output = diffusion_net(test_images.to(device), code=codes)
+                    model_output = watermark_net(test_images.to(device), code=codes)
                     wm_img = ((torch.clamp(model_output["image_out"], -1, 1) + 1) * 127.5).round()
                     wm_img = wm_img/127.5 - 1
 
-                    img_cat = torch.cat((wm_img, images), 0)
+                    decoder_output = decoder(wm_img)
 
-                    pred_codes, detect = detector(img_cat)
-
-                    pred_detect_out = pred_codes[:test_images.shape[0]].argmax(1)
+                    pred_detect_out = decoder_output["decoded"][:test_images.shape[0]].argmax(1)
                     data_logger["test_wm_accuracy"].append((pred_detect_out == ones_spot).float().mean().item())
-
-                    detect_out = (detect > 0.4).long()
-                    data_logger["test_detect_accuracy"].append((detect_out == contains_watermark.long()).float().mean().item())
 
                 # Keep a copy of the previous save in case we accidentally save a model that has exploded...
                 if os.path.isfile(args.save_dir + "/Models/" + save_file_name + ".pt"):
@@ -309,12 +276,12 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
                 # Save a checkpoint
                 torch.save({'epoch': epoch + 1,
                             'data_logger': dict(data_logger),
-                            'model_state_dict': diffusion_net.state_dict(),
-                            'detector_model_state_dict': detector.state_dict(),
+                            'model_state_dict': watermark_net.state_dict(),
+                            'decoder_model_state_dict': decoder.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'args': args.__dict__,
                 }, args.save_dir + "/Models/" + save_file_name + ".pt")
 
                 # Set the model back into training mode!!
-                diffusion_net.train()
-                detector.train()
+                watermark_net.train()
+                decoder.train()
