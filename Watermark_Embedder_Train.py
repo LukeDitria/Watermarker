@@ -53,6 +53,9 @@ parser.add_argument("--watermark_scale", help="How mush to scale the watermark b
 # bool args
 parser.add_argument("--load_checkpoint", '-cp', action='store_true', help="Load from checkpoint")
 parser.add_argument("--lr_decay", '-ld', action='store_true', help="learning rate decay")
+parser.add_argument("--fade_scale", action='store_true',
+                    help="Slowly reduce the watermark scale to the target value over half the training period")
+parser.add_argument("--blur_wm", action='store_true', help="Blur the watermark before combining with the image")
 
 args = parser.parse_args()
 
@@ -116,7 +119,8 @@ watermark_net = Unet(channels=test_images.shape[1],
                      embedding_size=args.embedding_size,
                      kernel_size=args.blur_size,
                      max_sigma=args.sigma_size,
-                     watermark_scale=args.watermark_scale).to(device)
+                     watermark_scale=args.watermark_scale,
+                     blur_watermark=args.blur_wm).to(device)
 
 decoder = Decoder(channels=test_images.shape[1], num_outputs=args.embedding_size,
                   ch=args.d_ch_multi, blocks=args.d_block_widths).to(device)
@@ -129,6 +133,8 @@ optimizer = optim.Adam(params, lr=args.lr)
 model_is_good = True
 # AMP Scaler
 scaler = torch.cuda.amp.GradScaler()
+
+max_iter = args.nepoch * len(train_loader)
 
 if args.target == "image":
     print("Model is predicting the image")
@@ -194,11 +200,17 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
     optimizer.zero_grad()
     for i, (images, _) in enumerate(tqdm(train_loader, leave=False)):
         current_iter = i + epoch * len(train_loader)
-        max_iter = args.nepoch * len(train_loader)
 
         if args.lr_decay:
             new_lr = args.lr * (max_iter - current_iter)/max_iter
             optimizer.param_groups[0]["lr"] = new_lr
+
+        if args.fade_scale:
+            scale_max_iter = max_iter/2
+            starting_scale = 0.5 - args.watermark_scale
+            wm_scale = max(0, starting_scale * ((scale_max_iter - current_iter)/scale_max_iter)) + args.watermark_scale
+        else:
+            wm_scale = args.watermark_scale
 
         images = images.to(device)
         bs, c, h, w = images.shape
@@ -208,7 +220,7 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
             ones_spot = torch.randint(args.embedding_size, (bs, ), device=device)
             codes = F.one_hot(ones_spot, args.embedding_size).float()
 
-            model_output = watermark_net(images, code=codes)
+            model_output = watermark_net(images, code=codes, wm_scale=wm_scale)
 
             img_cat = torch.cat((model_output["image_out"], images), 0)
             detector_input = img_cat + 0.01 * torch.randn_like(img_cat)
@@ -256,7 +268,7 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
                     contains_watermark = torch.cat((torch.ones(test_images.shape[0], 1, device=device),
                                                     torch.zeros(test_images.shape[0], 1, device=device)), 0)
 
-                    model_output = watermark_net(test_images.to(device), code=codes)
+                    model_output = watermark_net(test_images.to(device), code=codes, wm_scale=wm_scale)
                     wm_img = ((torch.clamp(model_output["image_out"], -1, 1) + 1) * 127.5).round()
                     wm_img = wm_img/127.5 - 1
 

@@ -304,6 +304,7 @@ class Unet(nn.Module):
         embedding_size=32,
         embedding_vec=128,
         watermark_scale=0.025,
+        blur_watermark=True,
         kernel_size=5,
         max_sigma=2,
     ):
@@ -383,7 +384,11 @@ class Unet(nn.Module):
 
         self.act_fnc = nn.ELU()
         self.watermark_scale = watermark_scale
-        self.blur = hf.GaussianBlur(kernel_size=kernel_size, max_sigma=max_sigma, sample_sigma=False)
+
+        if blur_watermark:
+            self.blur = hf.GaussianBlur(kernel_size=kernel_size, max_sigma=max_sigma, sample_sigma=False)
+        else:
+            self.blur = None
 
     def forward(self, x_in, code, wm_scale=None):
 
@@ -422,7 +427,9 @@ class Unet(nn.Module):
 
         x = self.final_res_block(x, t)
         wm_out = torch.tanh(self.final_conv(x))
-        wm_out = self.blur(wm_out)
+
+        if self.blur is not None:
+            wm_out = self.blur(wm_out)
 
         if wm_scale is None:
             wm_scale = self.watermark_scale
