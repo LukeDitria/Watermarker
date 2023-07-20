@@ -295,21 +295,20 @@ class Unet(nn.Module):
         channels=3,
         img_size=64,
         self_attention_res=16,
-        self_condition=False,
         resnet_block_groups=8,
         learned_variance=False,
         alpha_conditioned=False,
         with_time_embedding=True,
+        conditional_in="none",
+        conditional_dim=100,
     ):
         super().__init__()
 
         # determine dimensions
         self.channels = channels
-        self.self_condition = self_condition
-        input_channels = channels * (2 if self_condition else 1)
 
         init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding=3)
+        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -339,8 +338,23 @@ class Unet(nn.Module):
             print("No Time Embedding")
             time_dim = 32
 
-        # layers
+        self.conditional_in = conditional_in
+        self.conditional_dim = conditional_dim
 
+        if conditional_in == "class":
+            self.class_embedding = nn.Embedding(conditional_dim, time_dim)
+            time_dim *= 2
+            print("Class Conditional input")
+        elif conditional_in == "attribute":
+            self.attribute_fc = nn.Linear(conditional_dim, time_dim)
+            time_dim *= 2
+            print("Attribute Conditional input")
+        elif conditional_in == "none":
+            print("No Conditional input")
+        else:
+            ValueError("Conditional input type invalid")
+
+        # layers
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
@@ -395,10 +409,7 @@ class Unet(nn.Module):
 
         self.act_fnc = nn.ELU()
 
-    def forward(self, x, time=None, x_self_cond=None):
-        if self.self_condition:
-            x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim=1)
+    def forward(self, x, time=None, cond_input=None):
 
         x = self.init_conv(x)
         r = x.clone()
@@ -409,6 +420,18 @@ class Unet(nn.Module):
             t = self.time_mlp(time)
         else:
             t = torch.ones(x.shape[0], 32, device=x.device)
+
+        if self.conditional_in == "class":
+            if cond_input is None:
+                cond_input = torch.randint(self.conditional_dim, (x.shape[0], ), device=x.device)
+            cond_vec = self.class_embedding(cond_input)
+            t = torch.cat((t, cond_vec), 1)
+
+        elif self.conditional_in == "attribute":
+            if cond_input is None:
+                cond_input = torch.bernoulli(0.5 * torch.ones(x.shape[0], self.conditional_dim, device=x.device))
+            cond_vec = self.attribute_fc(cond_input)
+            t = torch.cat((t, cond_vec), 1)
 
         h = []
 
