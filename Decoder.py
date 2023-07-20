@@ -80,9 +80,9 @@ class ResUp(nn.Module):
         return self.act_fnc(self.bn2(x + skip))
 
 
-class Detector(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, channels, num_outputs, ch=64, blocks=(1, 2, 4, 8)):
-        super(Detector, self).__init__()
+        super(Decoder, self).__init__()
         self.conv_in = nn.Conv2d(channels, blocks[0] * ch, 3, 1, 1)
 
         widths_in = list(blocks)
@@ -113,26 +113,8 @@ class Detector(nn.Module):
         x = x.reshape(x.shape[0], -1)
 
         wm_x = self.fc_watermark(x)
+        det_x = self.fc_detector(x)
 
-        return wm_x, self.fc_detector(x)
+        output = {"decoded": wm_x, "detected": det_x}
 
-
-class DetectorResNet(nn.Module):
-    def __init__(self, channels, num_outputs, ch=64, blocks=(1, 2, 4, 8)):
-        super(DetectorResNet, self).__init__()
-        self.res_net = models.resnet18(pretrained=True)
-
-        num_ftrs = self.res_net.fc.in_features
-        self.res_net.fc = nn.Linear(num_ftrs, 256)
-
-        self.fc_watermark = nn.Linear(256, num_outputs)
-        self.fc_detector = nn.Linear(256, 1)
-
-        self.act_fnc = nn.ELU()
-
-    def forward(self, x):
-        x = self.act_fnc(self.res_net(x))
-
-        wm_x = self.fc_watermark(x)
-
-        return wm_x, self.fc_detector(x)
+        return output
