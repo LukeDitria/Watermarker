@@ -57,6 +57,7 @@ parser.add_argument("--classes_to_mark", '-ctm', help="Image Classes to add wate
                     nargs='+', default=(0,))
 parser.add_argument("--conditional_dim", "-cdim", help="Dimension of conditional input ", type=int, default=100)
 parser.add_argument("--num_wm", '-nw', help="Number of watermarks", type=int, default=256)
+parser.add_argument("--data_workers", help="Number of Dataloader workers", type=int, default=4)
 
 # float args
 parser.add_argument("--lr", help="Learning rate", type=float, default=1e-5)
@@ -105,7 +106,7 @@ else:
     train_set = CustomDataset(dataset_root=args.dataset_root, transform=transform)
     test_set = train_set
 
-train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4)
+train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.data_workers)
 test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
 
 # Get a test image batch from the test_loader to visualise the reconstruction quality etc
