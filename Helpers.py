@@ -56,7 +56,8 @@ def cosine_alphas_bar(timesteps, s=0.008):
     return alphas_bar
 
 
-def image_cold_diffuse_simple(diffusion_model, batch_size, total_steps, device, image_size=32, no_p_bar=True, noise_sigma=1):
+def image_cold_diffuse_simple(diffusion_model, batch_size, total_steps, device, image_size=32, no_p_bar=True,
+                              noise_sigma=1, attributes_list=None):
     diffusion_model.eval()
 
     random_image_sample = noise_sigma * torch.randn(batch_size, 3, image_size, image_size, device=device)
@@ -66,7 +67,13 @@ def image_cold_diffuse_simple(diffusion_model, batch_size, total_steps, device, 
 
     for i in trange(total_steps-1, disable=no_p_bar):
         index = i * torch.ones(batch_size, device=device)
-        img_output = diffusion_model(sample_in, index)["image_out"]
+
+        if attributes_list is not None:
+            att_indx = torch.randint(attributes_list.shape[0], (batch_size,))
+            att_select = attributes_list[att_indx].to(device).float()
+            img_output = diffusion_model(sample_in, index, att_select)["image_out"]
+        else:
+            img_output = diffusion_model(sample_in, index)["image_out"]
 
         noise = noise_from_x0(sample_in, img_output, alphas[i])
         x0 = img_output

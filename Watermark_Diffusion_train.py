@@ -5,7 +5,7 @@ import torchvision.datasets as Datasets
 import torchvision.transforms as transforms
 import torch.nn.functional as F
 import torchvision.utils as vutils
-from torchvision.datasets import MNIST, FashionMNIST, CIFAR10, CIFAR100
+from torchvision.datasets import MNIST, FashionMNIST, CIFAR10, CIFAR100, ImageFolder
 
 import os
 import shutil
@@ -15,10 +15,13 @@ import argparse
 from ema_pytorch import EMA
 from sklearn.metrics import fbeta_score
 import numpy as np
+import pandas as pd
 
+from Dataloader import Flower102Dataset as CustomDataset
 from Unet import Unet
-from Detector import Detector
-from Watermark_Embedder import Unet as UnetWm
+
+# from Watermark_Embedder_Simple import Unet as Watermarker
+from Watermark_Generator_CBN import Generator as Watermarker
 
 import Helpers as hf
 
@@ -31,9 +34,10 @@ parser.add_argument("--dataset_root", help="Dataset root dir", type=str, default
 parser.add_argument("--dataset", help="Pytorch dataset to use", type=str, default="none")
 
 parser.add_argument("--save_dir", help="Root dir for saving model and data", type=str,
-                    default="/media/luke/Kingston_Storage/Models/VAE")
+                    default="/media/luke/Kingston_Storage/Models/Watermarker")
 parser.add_argument("--target", help="Model output target -> image/noise", type=str, default="image")
 parser.add_argument("--data_attribute", help="Dataset attribute to encode", type=str, default="none")
+parser.add_argument("--conditional_input", "-cin", help="Diffusion conditional input", type=str, default="none")
 
 # int args
 parser.add_argument("--nepoch", help="Number of training epochs", type=int, default=2000)
@@ -51,6 +55,8 @@ parser.add_argument("--uncert_multi", '-um', help="Uncertainty noise multiplier"
 parser.add_argument("--num_steps", '-ns', help="number of training diffusion steps", type=int, default=50)
 parser.add_argument("--classes_to_mark", '-ctm', help="Image Classes to add watermark to", type=int,
                     nargs='+', default=(0,))
+parser.add_argument("--conditional_dim", "-cdim", help="Dimension of conditional input ", type=int, default=100)
+parser.add_argument("--num_wm", '-nw', help="Number of watermarks", type=int, default=256)
 
 # float args
 parser.add_argument("--lr", help="Learning rate", type=float, default=1e-5)
@@ -66,6 +72,13 @@ args = parser.parse_args()
 use_cuda = torch.cuda.is_available()
 device = torch.device(args.device_index if use_cuda else "cpu")
 torch.cuda.set_device(device)
+
+if args.image_size < 64:
+    from Decoder import DecoderResNet18Sml as Decoder
+elif args.image_size < 128:
+    from Decoder import DecoderResNet18 as Decoder
+else:
+    from Decoder import DecoderResNet34 as Decoder
 
 transform = transforms.Compose([transforms.Resize(args.image_size),
                                 transforms.CenterCrop(args.image_size),
@@ -85,8 +98,11 @@ elif args.dataset == "cifar100":
 elif args.dataset == "mnist":
     train_set = MNIST(root=args.dataset_root, train=True, transform=transform)
     test_set = MNIST(root=args.dataset_root, train=False, transform=transform)
+elif args.dataset == "artbench10":
+    train_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/train", transform=transform)
+    test_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/test", transform=transform)
 else:
-    train_set = Datasets.ImageFolder(root=args.dataset_root, transform=transform)
+    train_set = CustomDataset(dataset_root=args.dataset_root, transform=transform)
     test_set = train_set
 
 train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4)
@@ -100,7 +116,9 @@ diffusion_net = Unet(channels=test_images.shape[1],
                      img_size=args.image_size,
                      out_dim=test_images.shape[1],
                      dim=args.diff_ch_multi,
-                     dim_mults=args.diff_block_widths).to(device)
+                     dim_mults=args.diff_block_widths,
+                     conditional_in=args.conditional_input,
+                     conditional_dim=args.conditional_dim).to(device)
 
 # Setup optimizer
 optimizer = optim.Adam(diffusion_net.parameters(), lr=args.lr)
@@ -109,6 +127,12 @@ optimizer = optim.Adam(diffusion_net.parameters(), lr=args.lr)
 model_is_good = True
 # AMP Scaler
 scaler = torch.cuda.amp.GradScaler()
+
+if args.conditional_input == "attribute":
+    dataframe = pd.read_csv(os.path.join(args.dataset_root, "attributes.csv"))
+    attributes_list = torch.tensor(((dataframe[dataframe.keys()[1:]].to_numpy() + 1)/2))
+else:
+    attributes_list = None
 
 if args.target == "image":
     print("Model is predicting the image")
@@ -162,35 +186,33 @@ else:
         # Loss and metrics logger
         data_logger = defaultdict(lambda: [])
         ema = EMA(diffusion_net, beta=0.9999, update_after_step=100, update_every=10)
+        data_logger["class_counts"] = np.zeros(args.num_wm)
 
-wm_save_file_name = args.watermark_model_name + "_" + str(args.image_size)
-embedding_size = 0
+wm_save_file_name = args.watermark_model_name + "_ims_" + str(args.image_size) + "_emb_" + str(args.num_wm)
+print(wm_save_file_name)
 if os.path.isfile(args.save_dir + "/Models/" + wm_save_file_name + ".pt"):
     wm_checkpoint = torch.load(args.save_dir + "/Models/" + wm_save_file_name + ".pt", map_location="cpu")
     wm_args = wm_checkpoint["args"]
-    embedding_size = wm_args["embedding_size"]
+    print(wm_args["watermark_scale"])
 
-    watermark_net = UnetWm(channels=test_images.shape[1],
-                           img_size=args.image_size,
-                           out_dim=test_images.shape[1],
-                           dim=wm_args["diff_ch_multi"],
-                           dim_mults=wm_args["diff_block_widths"],
-                           embedding_size=embedding_size,
-                           watermark_scale=wm_args["watermark_scale"]).to(device)
+    watermark_net = Watermarker(channels=test_images.shape[1],
+                                img_size=args.image_size,
+                                dim=wm_args["wm_ch_multi"],
+                                dim_mults=wm_args["wm_block_widths"],
+                                num_watermarks=args.num_wm,
+                                watermark_scale=wm_args["watermark_scale"],
+                                blur_kernel_size=wm_args["blur_kernel_size"],
+                                blur_sigma=wm_args["blur_sigma"]).to(device)
 
-    detector = Detector(channels=test_images.shape[1],
-                        num_outputs=embedding_size,
-                        ch=wm_args["d_ch_multi"],
-                        blocks=wm_args["d_block_widths"]).to(device)
+    decoder = Decoder(num_outputs=args.num_wm).to(device)
 
     watermark_net.load_state_dict(wm_checkpoint['model_state_dict'])
-    detector.load_state_dict(wm_checkpoint['detector_model_state_dict'])
+    decoder.load_state_dict(wm_checkpoint['decoder_model_state_dict'])
 
     watermark_net.eval()
-    detector.eval()
+    decoder.eval()
 else:
     raise ValueError("Warning! Watermarker Checkpoint does NOT exist")
-data_logger["class_counts"] = np.zeros(embedding_size)
 
 alphas = torch.flip(hf.cosine_alphas_bar(args.num_steps), (0, )).to(device)
 
@@ -207,6 +229,8 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
             optimizer.param_groups[0]["lr"] = new_lr
 
         images = data[0].to(device)
+        labels = data[1].to(device)
+
         bs, c, h, w = images.shape
 
         with torch.cuda.amp.autocast():
@@ -220,26 +244,27 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
                     imgs_to_wm = images[mask]
                     imgs_no_wm = images[~mask]
 
-                    labels_wm = data[1][mask]
+                    labels_wm = labels[mask]
 
-                    codes = F.one_hot(labels_wm, embedding_size).float().to(device)
-                    wm_model_output = watermark_net(imgs_to_wm, code=codes)
+                    codes = F.one_hot(labels_wm, args.num_wm).float().to(device)
+                    wm_model_output = watermark_net(imgs_to_wm, wm_index=labels_wm)
 
                     # Pretend we're converting to uint8 and back
                     wm_img = ((wm_model_output["image_out"] + 1) * 127.5).round()
                     wm_img = wm_img/127.5 - 1
 
                     image_in = torch.cat((imgs_no_wm, wm_img), 0)
-                    wm_target = torch.cat((torch.zeros(imgs_no_wm.shape[0]), torch.ones(wm_img.shape[0])))
                 else:
                     image_in = images
                     imgs_to_wm = None
-                    wm_target = torch.zeros(bs)
 
                 random_sample = torch.randn_like(images)
                 noise_image = alpha.sqrt() * image_in + (1 - alpha).sqrt() * random_sample
 
-            model_output = diffusion_net(noise_image, index)
+            if args.conditional_input == "none":
+                model_output = diffusion_net(noise_image, index)
+            else:
+                model_output = diffusion_net(noise_image, index, cond_input=labels)
 
             if args.target == "image":
                 loss = F.l1_loss(model_output["image_out"], image_in)
@@ -256,7 +281,7 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
 
         with torch.no_grad():
             data_logger["loss"].append(loss.item())
-            data_logger["num_wm"].append(int(torch.any(data[1] == 1)))
+            data_logger["num_wm"].append(mask.sum().item())
 
         # Try to detect if the model has exploded and stop training
         if torch.isinf(loss) or torch.isnan(loss) or (model_output["image_out"].mean().abs() >= 0.9):
@@ -271,20 +296,12 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
 
             with torch.cuda.amp.autocast():
                 with torch.no_grad():
-                    _, wm_detect = detector(image_in)
-
-                    accuracy = ((torch.sigmoid(wm_detect) >= 0.4).float().flatten().cpu() == wm_target).float().mean()
-                    data_logger["detected_accuracy"].append(accuracy.mean().item())
-
-                    if mask.sum() > 0 and args.use_watermarker:
-                        data_logger["percent_detected_wm"].append(torch.sigmoid(detector(wm_img)[1]).mean().item())
-
-                        f1_score = fbeta_score((torch.sigmoid(wm_detect) >= 0.4).float().flatten().cpu().numpy(),
-                                               wm_target.long().cpu().numpy(), beta=1.0)
-                        data_logger["detected_f1_score"].append(f1_score)
+                    decoder_output = decoder(image_in)
+                    detection = (F.softmax(decoder_output["decoded"], 1).max(1)[0] > 0.5).float()
+                    data_logger["num_detected_wm"].append(detection.sum().item())
 
                     if imgs_to_wm is not None:
-                        vutils.save_image(imgs_to_wm.cpu().float(),
+                        vutils.save_image(wm_img.cpu().float(),
                                           "%s/%s/%s_%d_wm_img.png" % (args.save_dir,
                                                                          "Results", args.model_name, args.image_size),
                                           normalize=True)
@@ -294,7 +311,8 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
                                                                       total_steps=args.num_steps,
                                                                       device=device,
                                                                       image_size=args.image_size,
-                                                                      noise_sigma=args.noise_sigma)
+                                                                      noise_sigma=args.noise_sigma,
+                                                                      attributes_list=attributes_list)
 
                     vutils.save_image(diff_img.cpu().float(),
                                       "%s/%s/%s_%d_cold_diff.png" % (args.save_dir,
@@ -303,19 +321,21 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
 
                     diff_img = ((diff_img + 1) * 127.5).round()
                     diff_img = diff_img/127.5 - 1
-                    pred_codes, detect = detector(diff_img)
-                    data_logger["percent_detected"].append(torch.sigmoid(detect).mean().item())
-                    data_logger["max_detected"].append(torch.sigmoid(detect).max().item())
+                    decoder_output = decoder(diff_img)
 
-                    data_logger["class_softmax"] = F.softmax(pred_codes, -1).mean(0).cpu().numpy()
+                    sm_dist = F.softmax(decoder_output["decoded"], -1)
+                    data_logger["class_softmax"] = sm_dist.mean(0).cpu().numpy()
+                    data_logger["max_score"].append(sm_dist.max().item())
 
-                    for i in range(pred_codes.shape[0]):
-                        if torch.sigmoid(detect[i]) > 0.4:
-                            data_logger["class_counts"][pred_codes[i].argmax().item()] += 1
+                    detection = (sm_dist.max(1)[0] > 0.5).float()
+                    data_logger["percent_diff_detected_wm"].append(detection.mean().item())
 
-                    diff_mask = (torch.sigmoid(detect) > 0.5).float()
-                    if diff_mask.sum() > 0:
-                        diff_img_ = diff_img[diff_mask.flatten() == 1]
+                    for i in range(detection.shape[0]):
+                        if detection[i] > 0.5:
+                            data_logger["class_counts"][decoder_output["decoded"][i].argmax().item()] += 1
+
+                    if detection.sum() > 0:
+                        diff_img_ = diff_img[detection.flatten() == 1]
                         vutils.save_image(diff_img_.cpu().float(),
                                           "%s/%s/%s_%d_wm_diff_img.png" % (args.save_dir,
                                                                          "Results", args.model_name, args.image_size),
