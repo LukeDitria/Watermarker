@@ -9,32 +9,22 @@ import scipy.io
 from torchvision.datasets import CIFAR10
 
 
-class CelebADataset(Dataset):
-    def __init__(self, dataset_root, transform=transforms.ToTensor()):
+class CelebAHQDataset(Dataset):
+    def __init__(self, dataset_root, target_attribute, transform=transforms.ToTensor()):
         self.dataframe = pd.read_csv(os.path.join(dataset_root, "attributes.csv"))
 
-        filepath_log = []
-        fileindx_log = []
-
-        for root, dirs, files in os.walk(dataset_root):
-            for file in files:
-                if file.split(".")[1] == "png":
-                    file_path = os.path.join(root, file)
-                    filepath_log.append(file_path)
-                    fileindx_log.append(int(file.split(".")[0]))
-
-        self.file_dict = dict(zip(fileindx_log, filepath_log))
-
         self.transform = transform
-        self.dataset_root = dataset_root
+        self.dataset_dir_root = os.path.join(dataset_root, "Images_128")
+        self.target_attribute_index = list(self.dataframe.keys()[1:]).index(target_attribute)
 
     def __getitem__(self, index):
-        abs_file_path = self.file_dict[index]
+        abs_file_path = os.path.join(self.dataset_dir_root, str(index) + ".png")
         img = self.transform(Image.open(abs_file_path))
+        attribute_vec = (self.dataframe.iloc[index].to_numpy()[1:]).astype(np.float)
 
-        class_index = ((self.dataframe.iloc[index].to_numpy()[1:] + 1) / 2).astype(np.float)
+        class_index = attribute_vec[self.target_attribute_index]
 
-        return img, torch.tensor(class_index).float()
+        return img, class_index, attribute_vec
 
     def __len__(self):
 

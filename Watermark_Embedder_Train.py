@@ -77,8 +77,6 @@ aug_transforms = transforms.RandomChoice([augmentation.RandomResizedCrop((args.i
                                           augmentation.RandomGaussianBlur((5, 5), (0.001, 1.0), p=1.)
                                           ])
 
-# blur = augmentation.RandomGaussianBlur((5, 5), (0.01, 2.0), p=1.)
-
 if args.dataset == "fashion":
     train_set = FashionMNIST(root=args.dataset_root, train=True, transform=transform)
     test_set = FashionMNIST(root=args.dataset_root, train=False, transform=transform)
@@ -94,8 +92,10 @@ elif args.dataset == "mnist":
 elif args.dataset == "artbench10":
     train_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/train", transform=transform)
     test_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/test", transform=transform)
-else:
-    data_set = CustomDataset(dataset_root=args.dataset_root, transform=transform)
+elif args.dataset == "flowers102":
+    from Dataloader import Flower102Dataset
+    data_set = Flower102Dataset(dataset_root=args.dataset_root + "/102flowers_128",
+                                 transform=transform)
 
     # Randomly split the dataset with a fixed random seed for reproducibility
     test_split = 0.9
@@ -103,6 +103,20 @@ else:
     n_test_examples = len(data_set) - n_train_examples
     train_set, test_set = torch.utils.data.random_split(data_set, [n_train_examples, n_test_examples],
                                                         generator=torch.Generator().manual_seed(42))
+elif args.dataset == "celeba":
+    from Dataloader import CelebAHQDataset
+    data_set = CelebAHQDataset(dataset_root=args.dataset_root + "/CelebAHQ",
+                                target_attribute=args.data_attribute,
+                                transform=transform)
+
+    # Randomly split the dataset with a fixed random seed for reproducibility
+    test_split = 0.9
+    n_train_examples = int(len(data_set) * test_split)
+    n_test_examples = len(data_set) - n_train_examples
+    train_set, test_set = torch.utils.data.random_split(data_set, [n_train_examples, n_test_examples],
+                                                        generator=torch.Generator().manual_seed(42))
+else:
+    ValueError("Dataset not defined")
 
 train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4)
 test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)

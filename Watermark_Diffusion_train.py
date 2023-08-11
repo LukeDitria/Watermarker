@@ -36,7 +36,7 @@ parser.add_argument("--dataset", help="Pytorch dataset to use", type=str, defaul
 parser.add_argument("--save_dir", help="Root dir for saving model and data", type=str,
                     default="/media/luke/Kingston_Storage/Models/Watermarker")
 parser.add_argument("--target", help="Model output target -> image/noise", type=str, default="image")
-parser.add_argument("--data_attribute", help="Dataset attribute to encode", type=str, default="none")
+parser.add_argument("--data_attribute", help="Dataset attribute to encode", type=str, default="")
 parser.add_argument("--conditional_input", "-cin", help="Diffusion conditional input", type=str, default="none")
 
 # int args
@@ -67,6 +67,7 @@ parser.add_argument("--noise_sigma", help="Sigma of sampled noise", type=float, 
 parser.add_argument("--load_checkpoint", '-cp', action='store_true', help="Load from checkpoint")
 parser.add_argument("--lr_decay", '-ld', action='store_true', help="learning rate decay")
 parser.add_argument("--use_watermarker", action='store_true', help="Use the Unet Watermarker to encode watermark")
+parser.add_argument("--mark_all", action='store_true', help="watermark every class")
 
 args = parser.parse_args()
 
@@ -102,9 +103,19 @@ elif args.dataset == "mnist":
 elif args.dataset == "artbench10":
     train_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/train", transform=transform)
     test_set = ImageFolder(root=args.dataset_root + "/artbench-10-imagefolder-split/test", transform=transform)
-else:
-    train_set = CustomDataset(dataset_root=args.dataset_root, transform=transform)
+elif args.dataset == "flowers102":
+    from Dataloader import Flower102Dataset
+    train_set = Flower102Dataset(dataset_root=args.dataset_root + "/102flowers_128",
+                                 transform=transform)
     test_set = train_set
+elif args.dataset == "celeba":
+    from Dataloader import CelebAHQDataset
+    train_set = CelebAHQDataset(dataset_root=args.dataset_root + "/CelebAHQ",
+                                target_attribute=args.data_attribute,
+                                transform=transform)
+    test_set = train_set
+else:
+    ValueError("Dataset not defined")
 
 train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.data_workers)
 test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False)
@@ -142,7 +153,11 @@ elif args.target == "noise":
 else:
     raise ValueError("Incorrect target source")
 
-print("Watermark on class:", args.classes_to_mark)
+
+if args.mark_all:
+    print("Watermarking all Classes:")
+else:
+    print("Watermark on class:", args.classes_to_mark)
 
 # Let's see how many Parameters our Model has!
 num_model_params = 0
@@ -240,7 +255,11 @@ for epoch in trange(start_epoch, args.nepoch, leave=False):
             alpha = alphas[index].reshape(bs, 1, 1, 1)
 
             with torch.no_grad():
-                mask = torch.any(data[1].unsqueeze(1) == torch.tensor([args.classes_to_mark]), 1).flatten()
+                if args.mark_all:
+                    mask = torch.ones(bs, dtype=torch.bool)
+                else:
+                    mask = torch.any(data[1].unsqueeze(1) == torch.tensor([args.classes_to_mark]), 1).flatten()
+
                 if mask.sum() > 0 and args.use_watermarker:
                     imgs_to_wm = images[mask]
                     imgs_no_wm = images[~mask]
