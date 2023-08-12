@@ -106,7 +106,6 @@ elif args.dataset == "flowers102":
 elif args.dataset == "celeba":
     from Dataloader import CelebAHQDataset
     data_set = CelebAHQDataset(dataset_root=args.dataset_root + "/CelebAHQ",
-                                target_attribute=args.data_attribute,
                                 transform=transform)
 
     # Randomly split the dataset with a fixed random seed for reproducibility
