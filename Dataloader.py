@@ -31,7 +31,7 @@ class CelebAHQDataset(Dataset):
         else:
             class_index = 0
 
-        return img, class_index, attribute_vec
+        return img, class_index
 
     def __len__(self):
 
