@@ -10,19 +10,26 @@ from torchvision.datasets import CIFAR10
 
 
 class CelebAHQDataset(Dataset):
-    def __init__(self, dataset_root, target_attribute, transform=transforms.ToTensor()):
+    def __init__(self, dataset_root, target_attribute=None, transform=transforms.ToTensor()):
         self.dataframe = pd.read_csv(os.path.join(dataset_root, "attributes.csv"))
 
         self.transform = transform
         self.dataset_dir_root = os.path.join(dataset_root, "Images_128")
-        self.target_attribute_index = list(self.dataframe.keys()[1:]).index(target_attribute)
+
+        if target_attribute is not None:
+            self.target_attribute_index = list(self.dataframe.keys()[1:]).index(target_attribute)
+        else:
+            self.target_attribute_index = None
 
     def __getitem__(self, index):
         abs_file_path = os.path.join(self.dataset_dir_root, str(index) + ".png")
         img = self.transform(Image.open(abs_file_path))
         attribute_vec = (self.dataframe.iloc[index].to_numpy()[1:]).astype(np.float)
 
-        class_index = attribute_vec[self.target_attribute_index]
+        if self.target_attribute_index is not None:
+            class_index = attribute_vec[self.target_attribute_index]
+        else:
+            class_index = 0
 
         return img, class_index, attribute_vec
 
